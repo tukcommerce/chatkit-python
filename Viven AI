@@ -1,0 +1,128 @@
+{
+  "version": "2025-09",
+  "agent_name": "TookCommerce Warehouse Agent (MVP)",
+  "description": "OCR 기반 창고 자동화 에이전트. 이미지 인식 → 로케이션 코드 및 상품명 추출 → ERP 업데이트 → 오류 검증 및 알림.",
+  "goal": "창고 이미지에서 로케이션 코드와 상품명을 추출해 ERP에 자동 등록한다.",
+  "model": {
+    "name": "gpt-4o-mini",
+    "temperature": 0.2,
+    "max_tokens": 4096
+  },
+  "instructions": [
+    "1. 사용자가 업로드한 이미지를 vision_ocr로 분석한다.",
+    "2. OCR 결과를 parse_location_item으로 파싱해 로케이션 코드(LOC-XXXX)와 상품명을 추출한다.",
+    "3. 추출 결과를 update_inventory 함수로 ERP에 반영한다.",
+    "4. 인식률이 0.9 미만이거나 ERP 업데이트 실패 시 evaluate_accuracy를 호출한다.",
+    "5. 세 번 연속 실패하면 send_notification을 호출해 담당자에게 Slack 알림을 보낸다.",
+    "6. 모든 결과를 store_memory에 기록하고 최근 20건의 실패 패턴을 학습한다.",
+    "7. 최종 결과는 JSON 형식으로 반환한다."
+  ],
+  "tools": [
+    {
+      "name": "vision_ocr",
+      "type": "http",
+      "description": "이미지에서 텍스트를 추출하는 OCR API",
+      "endpoint": "https://vision.googleapis.com/v1/images:annotate",
+      "method": "POST",
+      "auth": "Bearer ${VISION_API_KEY}",
+      "params": {
+        "image_url": "string"
+      },
+      "response": {
+        "text": "string",
+        "confidence": "float"
+      }
+    },
+    {
+      "name": "parse_location_item",
+      "type": "function",
+      "description": "OCR 텍스트에서 로케이션 코드 및 상품명 파싱",
+      "code": "function parse_location_item(text) { const locMatch = text.match(/LOC-[0-9]{4}/); const name = text.replace(/LOC-[0-9]{4}/, '').trim(); return { location_code: locMatch ? locMatch[0] : null, product_name: name }; }"
+    },
+    {
+      "name": "update_inventory",
+      "type": "http",
+      "description": "ERP/WMS/Sheets API에 재고 정보 업데이트",
+      "endpoint": "https://erp.tookcommerce.ai/api/update_inventory",
+      "method": "POST",
+      "auth": "Bearer ${ERP_API_KEY}",
+      "params": {
+        "location_code": "string",
+        "product_name": "string",
+        "quantity": "integer",
+        "timestamp": "datetime"
+      },
+      "response": {
+        "status": "string"
+      }
+    },
+    {
+      "name": "evaluate_accuracy",
+      "type": "function",
+      "description": "OCR 인식률 및 ERP 업데이트 성공률 평가",
+      "code": "function evaluate_accuracy(confidence, status) { return confidence >= 0.9 && status === 'success'; }"
+    },
+    {
+      "name": "send_notification",
+      "type": "http",
+      "description": "Slack 또는 이메일로 오류 알림 발송",
+      "endpoint": "https://hooks.slack.com/services/${SLACK_WEBHOOK}",
+      "method": "POST",
+      "params": {
+        "message": "string"
+      }
+    },
+    {
+      "name": "store_memory",
+      "type": "database",
+      "description": "최근 20건 결과 저장",
+      "connection": "postgresql://took_ai:${DB_PASS}@db.tookcommerce.ai:5432/memory",
+      "schema": {
+        "id": "uuid",
+        "timestamp": "datetime",
+        "image_id": "string",
+        "location_code": "string",
+        "product_name": "string",
+        "confidence": "float",
+        "status": "string"
+      }
+    }
+  ],
+  "memory": {
+    "short_term": {
+      "limit": 10,
+      "duration": "1h"
+    },
+    "long_term": {
+      "limit": 100,
+      "duration": "7d",
+      "fields": ["image_id", "location_code", "product_name", "confidence", "status"]
+    }
+  },
+  "evaluation": {
+    "rules": [
+      { "metric": "ocr_accuracy", "threshold": 0.95 },
+      { "metric": "erp_success_rate", "threshold": 0.98 },
+      { "metric": "avg_processing_time", "threshold": 5, "unit": "seconds" }
+    ],
+    "actions": {
+      "on_fail": "send_notification",
+      "on_success": "store_memory"
+    }
+  },
+  "logging": {
+    "cloud_logging": true,
+    "error_reporting": "slack",
+    "weekly_summary": true
+  },
+  "deployment": {
+    "stage": "production",
+    "version": "1.0.0",
+    "rollback_enabled": true
+  },
+  "security": {
+    "secrets": ["VISION_API_KEY", "ERP_API_KEY", "SLACK_WEBHOOK", "DB_PASS"],
+    "data_retention_hours": 24,
+    "encryption": "AES256"
+  }
+}
